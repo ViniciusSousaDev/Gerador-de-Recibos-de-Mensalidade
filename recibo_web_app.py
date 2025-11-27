@@ -15,9 +15,10 @@ Funcionalidades:
 - Formulário para gerar recibo preenchendo: cliente (ou campos livres), valor, data, referente, observações
 - Gera PDF do recibo e retorna para download
 
-Observações:
-- O layout do recibo é simples e funcional; você pode ajustar posições/estilos no código.
-- Se quiser, posso adicionar validação de CPF/CNPJ, proteção por senha, ou exportar registros de recibos.
+Ajustes aplicados:
+- Melhor alinhamento do PDF para ficar mais próximo do exemplo enviado
+- Correção do texto por extenso: usa 'real/reais' corretamente (antes aparecia 'Realais')
+- Após adicionar um cliente novo, o formulário de geração de recibo é pré-populado automaticamente com esse cliente
 """
 
 from flask import Flask, g, render_template_string, request, redirect, url_for, send_file, flash
@@ -27,6 +28,7 @@ from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
+from reportlab.lib import colors
 from num2words import num2words
 import os
 
@@ -61,6 +63,20 @@ def init_db():
             observacao TEXT
         )
     ''')
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS recibos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cliente_id INTEGER,
+            nome TEXT,
+            cpf_cnpj TEXT,
+            valor TEXT,
+            data_recibo TEXT,
+            referente TEXT,
+            observacoes TEXT,
+            arquivo TEXT,
+            criado_em TEXT
+        )
+    ''')
     db.commit()
 
 # criar DB na inicialização
@@ -70,6 +86,7 @@ with app.app_context():
 # ---------- utilitários ----------
 
 def valor_por_extenso(value):
+    """Retorna valor por extenso em pt_BR com 'reais' e 'centavos'."""
     try:
         v = float(value)
     except:
@@ -79,10 +96,12 @@ def valor_por_extenso(value):
     partes = []
     if inteiro > 0:
         ext = num2words(inteiro, lang='pt_BR')
-        partes.append(f"{ext} real{'ais' if inteiro != 1 else ''}")
+        moeda = 'real' if inteiro == 1 else 'reais'
+        partes.append(f"{ext} {moeda}")
     if centavos > 0:
         extc = num2words(centavos, lang='pt_BR')
-        partes.append(f"{extc} centavo{'s' if centavos != 1 else ''}")
+        cent = 'centavo' if centavos == 1 else 'centavos'
+        partes.append(f"{extc} {cent}")
     if not partes:
         return 'zero reais'
     return ' e '.join(partes)
@@ -93,93 +112,122 @@ def gerar_recibo_pdf_memoria(d):
     buffer = BytesIO()
     width, height = A4
     c = canvas.Canvas(buffer, pagesize=A4)
-    margin = 15 * mm
+    margin = 12 * mm
 
-    # borda
+    # borda externa mais sutil
     c.setLineWidth(2)
     c.rect(margin, margin, width - 2*margin, height - 2*margin)
 
-    # cabeçalho
+    # cabeçalho: empresa e dados
+    empresa = d.get('empresa_nome', 'ESTILU CONTABILIDADE LTDA')
+    empresa_cnpj = d.get('empresa_cnpj', 'CNPJ: 26.631.734/0001-62')
+    empresa_end = d.get('empresa_end', 'Rua Oratório, 1683 - Parque das Nações - Santo André - SP')
+
     c.setFont('Helvetica-Bold', 14)
-    c.drawCentredString(width/2, height - margin - 12, 'ESTILU CONTABILIDADE LTDA')
+    c.drawCentredString(width/2, height - margin - 8, empresa)
     c.setFont('Helvetica', 8)
-    c.drawCentredString(width/2, height - margin - 26, 'Rua Oratório, 1683 - Parque das Nações - Santo André - SP')
+    c.drawCentredString(width/2, height - margin - 22, f"{empresa_cnpj}   {empresa_end}")
 
-    # caixa valor numérico
-    box_w = 50*mm
-    box_h = 12*mm
-    box_x = width - margin - box_w - 5*mm
-    box_y = height - margin - box_h - 10*mm
+    # caixa do valor numérico no canto superior direito (com fundo amarelo claro)
+    box_w = 55*mm
+    box_h = 14*mm
+    box_x = width - margin - box_w - 6*mm
+    box_y = height - margin - box_h - 14*mm
+    c.setFillColorRGB(1, 1, 0.6)  # amarelo claro
+    c.rect(box_x, box_y, box_w, box_h, stroke=0, fill=1)
     c.setLineWidth(1)
+    c.setFillColor(colors.black)
     c.rect(box_x, box_y, box_w, box_h, stroke=1, fill=0)
-    c.setFont('Helvetica-Bold', 10)
-    c.drawRightString(box_x + box_w - 6, box_y + box_h/2 - 4, f"R$ {float(d['valor']):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+    c.setFont('Helvetica-Bold', 11)
+    valor_formatado = f"R$ {float(d['valor']):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+    c.drawRightString(box_x + box_w - 8, box_y + box_h/2 - 4, valor_formatado)
 
-    # RECEBEMOS DE
+    # RECEBEMOS DE e campo grande (com destaque)
     recebemos_y = box_y - 18
     c.setFont('Helvetica', 9)
-    c.drawString(margin + 8, recebemos_y + 10, 'RECEBEMOS DE:')
-    nome_box_y = recebemos_y - 6
-    c.rect(margin + 8, nome_box_y - 20, width - 2*margin - (box_w + 20*mm), 24, stroke=1, fill=0)
+    c.drawString(margin + 10, recebemos_y + 12, 'RECEBEMOS DE:')
+    nome_box_w = width - 2*margin - box_w - 24*mm
+    nome_box_x = margin + 10
+    nome_box_h = 26
+    nome_box_y = recebemos_y - 8 - nome_box_h
+    c.setFillColorRGB(1, 1, 0.9)
+    c.rect(nome_box_x, nome_box_y, nome_box_w, nome_box_h, stroke=0, fill=1)
+    c.setFillColor(colors.black)
+    c.setLineWidth(1)
+    c.rect(nome_box_x, nome_box_y, nome_box_w, nome_box_h, stroke=1, fill=0)
     c.setFont('Helvetica-Bold', 10)
-    c.drawString(margin + 12, nome_box_y - 6, d['nome'])
+    c.drawString(nome_box_x + 6, nome_box_y + 6, d['nome'])
 
-    # valor por extenso
-    extenso_y = nome_box_y - 32
+    # valor por extenso em caixa grande
+    extenso_y_top = nome_box_y - 10
     c.setFont('Helvetica', 9)
-    c.drawString(margin + 8, extenso_y, 'LÍQUIDA DE:')
-    c.rect(margin + 8, extenso_y - 30, width - 2*margin - 16, 32, stroke=1, fill=0)
-    c.setFont('Helvetica', 9)
-    # quebra de linha simples
-    extenso = d['valor_extenso']
-    max_chars = 95
+    c.drawString(margin + 10, extenso_y_top, 'LÍQUIDA DE:')
+    ext_box_x = margin + 10
+    ext_box_w = width - 2*margin - 20
+    ext_box_h = 36
+    ext_box_y = extenso_y_top - 8 - ext_box_h
+    c.setFillColorRGB(1, 1, 0.9)
+    c.rect(ext_box_x, ext_box_y, ext_box_w, ext_box_h, stroke=0, fill=1)
+    c.setFillColor(colors.black)
+    c.rect(ext_box_x, ext_box_y, ext_box_w, ext_box_h, stroke=1, fill=0)
+
+    # quebrar o texto extenso em 2 linhas conforme exemplo
+    extenso = d.get('valor_extenso', '')
+    # espaço para indicar valor por extenso seguido de ' . ' conforme imagem
+    if extenso and not extenso.endswith('.'):
+        extenso = extenso + '.'
+    # split approx
+    max_chars_line = 90
     lines = []
     while extenso:
-        if len(extenso) <= max_chars:
+        if len(extenso) <= max_chars_line:
             lines.append(extenso)
             break
-        part = extenso[:max_chars]
+        part = extenso[:max_chars_line]
         last_space = part.rfind(' ')
         if last_space == -1:
             lines.append(part)
-            extenso = extenso[max_chars:]
+            extenso = extenso[max_chars_line:]
         else:
             lines.append(extenso[:last_space])
             extenso = extenso[last_space+1:]
-    text_y = extenso_y - 8
-    for ln in lines:
-        c.drawString(margin + 12, text_y, ln)
-        text_y -= 10
-
-    # referente
-    ref_y = extenso_y - 50
+    text_y = ext_box_y + ext_box_h - 12
     c.setFont('Helvetica', 9)
-    c.drawString(margin + 8, ref_y, 'REFERENTE:')
-    c.setFont('Helvetica-Bold', 9)
-    c.drawString(margin + 80, ref_y, d['referente'])
+    for ln in lines[:2]:
+        c.drawString(ext_box_x + 6, text_y, ln)
+        text_y -= 12
 
-    # discriminação e assinatura (simplificada)
-    discr_x = margin + 8
-    discr_y = ref_y - 30
-    discr_w = 85*mm
+    # REFERENTE
+    ref_y = ext_box_y - 8
+    c.setFont('Helvetica', 9)
+    c.drawString(margin + 10, ref_y, 'REFERENTE:')
+    c.setFont('Helvetica-Bold', 9)
+    c.drawString(margin + 80, ref_y, d.get('referente', ''))
+
+    # bloco discriminação (lado esquerdo)
+    discr_x = margin + 10
+    discr_y = ref_y - 26
+    discr_w = 90*mm
     discr_h = 60*mm
     c.rect(discr_x, discr_y - discr_h, discr_w, discr_h, stroke=1, fill=0)
-    c.setFont('Helvetica', 9)
-    c.drawString(discr_x + 10, discr_y - 35, 'MENSALIDADE')
-    c.drawRightString(discr_x + discr_w - 10, discr_y - 35, f"R$ {float(d['valor']):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
-    c.drawString(discr_x + 10, discr_y - 50, 'ALT. CONTRATO')
-    c.drawRightString(discr_x + discr_w - 10, discr_y - 50, 'R$ -')
-    c.drawString(discr_x + 10, discr_y - 65, 'REGULARIZAÇÃO')
-    c.drawRightString(discr_x + discr_w - 10, discr_y - 65, 'R$ -')
     c.setFont('Helvetica-Bold', 9)
-    c.drawString(discr_x + 10, discr_y - 90, 'VALOR TOTAL')
-    c.drawRightString(discr_x + discr_w - 10, discr_y - 90, f"R$ {float(d['valor']):,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.'))
+    c.drawString(discr_x + 8, discr_y - 12, 'DISCRIMINAÇÃO DOS VALORES')
+    c.setFont('Helvetica', 9)
+    c.drawString(discr_x + 10, discr_y - 30, 'MENSALIDADE')
+    c.drawRightString(discr_x + discr_w - 10, discr_y - 30, valor_formatado)
+    c.drawString(discr_x + 10, discr_y - 46, 'ALT. CONTRATO')
+    c.drawRightString(discr_x + discr_w - 10, discr_y - 46, 'R$ -')
+    c.drawString(discr_x + 10, discr_y - 62, 'REGULARIZAÇÃO')
+    c.drawRightString(discr_x + discr_w - 10, discr_y - 62, 'R$ -')
+    c.setFont('Helvetica-Bold', 9)
+    c.drawString(discr_x + 10, discr_y - 86, 'VALOR TOTAL')
+    c.drawRightString(discr_x + discr_w - 10, discr_y - 86, valor_formatado)
 
-    # assinatura
+    # bloco assinatura (lado direito)
     assin_x = discr_x + discr_w + 12
     assin_y = discr_y - 10
     assin_w = width - margin - assin_x - 8
-    assin_h = discr_h - 12
+    assin_h = discr_h - 8
     c.rect(assin_x, assin_y - assin_h, assin_w, assin_h, stroke=1, fill=0)
     c.setFont('Helvetica', 9)
     c.drawString(assin_x + 8, assin_y - 16, 'NOME:')
@@ -188,21 +236,25 @@ def gerar_recibo_pdf_memoria(d):
     c.line(assin_x + 8, assin_y - 78, assin_x + assin_w - 8, assin_y - 78)
     c.setFont('Helvetica-Bold', 9)
     c.drawString(assin_x + 10, assin_y - 28, d['nome'])
-    c.drawString(assin_x + 10, assin_y - 70, d['cpf_cnpj'])
+    c.drawString(assin_x + 10, assin_y - 70, d.get('cpf_cnpj', ''))
 
-    # rodapé
-    rodape_y = margin + 30
+    # rodapé - local e data
+    rodape_y = margin + 28
     c.setFont('Helvetica', 9)
-    c.drawString(margin + 8, rodape_y + 6, f"Santo André, {d['data_recibo']}")
+    c.drawString(margin + 10, rodape_y + 6, f"Santo André, {d.get('data_recibo', '')}")
     c.setFont('Helvetica', 8)
-    c.drawString(margin + 8, rodape_y - 8, f"Observações: {d['observacoes']}")
+    c.drawString(margin + 10, rodape_y - 8, f"Observações: {d.get('observacoes', '')}")
+
+    # assinatura empresa no canto inferior direito
+    c.setFont('Helvetica-Bold', 9)
+    c.drawRightString(width - margin - 8, margin + 12, empresa)
 
     c.showPage()
     c.save()
     buffer.seek(0)
     return buffer
 
-# ---------- rotas web ----------
+# ---------- rotas web (HTML inline) ----------
 
 INDEX_HTML = """
 <!doctype html>
@@ -215,6 +267,7 @@ INDEX_HTML = """
     <style>
       body{padding:20px}
       .card{margin-bottom:20px}
+      textarea[readonly]{background:#f8f9fa}
     </style>
   </head>
   <body>
@@ -317,7 +370,7 @@ INDEX_HTML = """
 
                 <div class="d-flex gap-2">
                   <button class="btn btn-primary" type="submit">Gerar PDF</button>
-                  <button class="btn btn-outline-secondary" type="button" onclick="document.getElementById('valor_ext').value=''; calcExt();">Limpar extenso</button>
+                  <button class="btn btn-outline-secondary" type="button" onclick="document.getElementById('valor_ext').value='';">Limpar extenso</button>
                 </div>
 
                 <div class="mt-3">
@@ -408,8 +461,26 @@ def add_client():
     cur = db.cursor()
     cur.execute('INSERT INTO clientes (nome, cpf_cnpj, observacao) VALUES (?, ?, ?)', (nome, cpf, obs))
     db.commit()
-    flash('Cliente adicionado.')
-    return redirect(url_for('index'))
+    client_id = cur.lastrowid
+    # buscar o cliente recém-criado e pré-popular o formulário
+    cur.execute('SELECT * FROM clientes WHERE id = ?', (client_id,))
+    c = cur.fetchone()
+    prepop = {
+        'nome': c['nome'],
+        'cpf_cnpj': c['cpf_cnpj'],
+        'valor': '',
+        'valor_extenso': '',
+        'data_recibo': datetime.now().strftime('%d/%m/%Y'),
+        'referente': '',
+        'observacoes': c['observacao'] or ''
+    }
+    db = get_db()
+    cur = db.cursor()
+    cur.execute('SELECT * FROM clientes ORDER BY nome')
+    clientes = cur.fetchall()
+    hoje = datetime.now().strftime('%d/%m/%Y')
+    flash('Cliente adicionado e carregado no formulário.')
+    return render_template_string(INDEX_HTML, clientes=clientes, prepop=prepop, hoje=hoje)
 
 @app.route('/edit_client/<int:cid>', methods=['GET', 'POST'])
 def edit_client(cid):
@@ -481,11 +552,28 @@ def generate():
         'valor_extenso': valor_extenso,
         'data_recibo': data_recibo,
         'referente': referente,
-        'observacoes': observacoes
+        'observacoes': observacoes,
+        'empresa_nome': 'ESTILU CONTABILIDADE LTDA',
+        'empresa_cnpj': 'CNPJ: 26.631.734/0001-62',
+        'empresa_end': 'Rua Oratório, 1683 - Parque das Nações - Santo André - SP'
     }
+
+    # salvar metadados do recibo
+    db = get_db()
+    cur = db.cursor()
+    cur.execute('INSERT INTO recibos (cliente_id,nome,cpf_cnpj,valor,data_recibo,referente,observacoes,arquivo,criado_em) VALUES (?,?,?,?,?,?,?,?,?)',
+                (None, nome, cpf, valor, data_recibo, referente, observacoes, None, datetime.now().isoformat()))
+    db.commit()
+
     pdf_io = gerar_recibo_pdf_memoria(d)
     filename = f"recibo_{nome[:20].replace(' ', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf"
     return send_file(pdf_io, as_attachment=True, download_name=filename, mimetype='application/pdf')
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    host = '0.0.0.0'
+    port = 5000
+    print(f"INICIANDO APLICACAO - acesse http://127.0.0.1:{port} ou http://localhost:{port}")
+    try:
+        app.run(host=host, port=port, debug=True)
+    except Exception as e:
+        print('ERRO AO INICIAR SERVIDOR:', e)
